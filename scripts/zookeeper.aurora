@@ -1,0 +1,189 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+# 
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+import textwrap
+
+class Profile(Struct):
+  archive = Default(String, 'https://archive.apache.org/dist')
+  gpg_grp = Default(String, 'https://people.apache.org/keys/group')
+  svc = Default(String, 'zookeeper')
+  svc_ver = Default(String, '3.4.6')
+  svc_monitor_period = Default(String, '15') # seconds
+  svc_log_dir = Default(String, 'logs')
+  svc_prop_file = Default(String, 'zoo.cfg')
+  svc_data_dir = Default(String, 'data')
+  svc_tick_time = Default(String, '2000')
+  svc_init_limit = Default(String, '5')
+  svc_sync_limit = Default(String, '2')
+  jvm_flags = Default(String, '-Xmx512M -Xms512M')
+
+
+common = Process(
+  name = 'fetch commons',
+  cmdline = textwrap.dedent("""
+    hdfs dfs -get /dist/scripts.tgz
+    tar xf scripts.tgz
+  """)
+)
+
+dist = Process(
+  name = 'fetch {{profile.svc}} v{{profile.svc_ver}} distribution',
+  cmdline = textwrap.dedent("""
+    command -v curl >/dev/null 2>&1 || { echo >&2 "error: 'curl' is not installed. Aborting."; exit 1; }
+    eval curl -sSfL '-O {{profile.archive}}/zookeeper/zookeeper-{{profile.svc_ver}}/zookeeper-{{profile.svc_ver}}.tar.gz'{,.asc,.md5,.sha1}
+    if command -v md5sum >/dev/null; then
+      md5sum -c zookeeper-{{profile.svc_ver}}.tar.gz.md5
+    elif command -v sha1sum >/dev/null; then
+      sha1sum -c zookeeper-{{profile.svc_ver}}.tar.gz.sha1
+    else
+      echo "warn: 'md5sum' and 'sha1sum' are not installed. Check skipped." >&2
+    fi
+    if command -v gpg >/dev/null; then
+      curl -sSfL {{profile.gpg_grp}}/zookeeper.asc | gpg --import
+      gpg zookeeper-{{profile.svc_ver}}.tar.gz.asc
+    else
+      echo "warn: 'gpg' is not installed. Signature verification skipped." >&2
+    fi
+    tar xf zookeeper-{{profile.svc_ver}}.tar.gz
+  """)
+)
+
+register = Process(
+  name = 'register-service',
+  cmdline = textwrap.dedent("""
+    export IP=$(host `hostname` | tr ' ' '\n' | tail -1)
+    ./scripts/common/registry.sh -r {{profile.svc}}-{{environment}}-client -i {{mesos.instance}} \
+      -p "$IP:{{thermos.ports[client]}}"
+    ./scripts/common/registry.sh -r {{profile.svc}}-{{environment}}-server -i {{mesos.instance}} \
+      -p "server.{{mesos.instance}}=$IP:{{thermos.ports[p2p]}}:{{thermos.ports[lead]}}"
+  """)
+)
+
+unregister = Process(
+  name = 'unregister-service',
+  final = True,
+  cmdline = textwrap.dedent("""
+    ./scripts/common/registry.sh -u {{profile.svc}}-{{environment}}-client -i {{mesos.instance}} &
+    ./scripts/common/registry.sh -u {{profile.svc}}-{{environment}}-server -i {{mesos.instance}}
+  """)
+)
+
+config = Process(
+  name = 'create {{profile.svc_prop_file}}',
+  cmdline = textwrap.dedent("""
+    mkdir -p {{profile.svc_data_dir}}
+    echo {{mesos.instance}} > {{profile.svc_data_dir}}/myid
+
+    echo "Wrote '{{profile.svc_data_dir}}/myid':"
+    cat {{profile.svc_data_dir}}/myid
+
+    export REGISTRIES=$(./scripts/common/registry.sh -q {{profile.svc}}-{{environment}}-server -c {{instances}})
+    echo -e "
+    tickTime={{profile.svc_tick_time}}
+    dataDir={{profile.svc_data_dir}}
+    clientPort={{thermos.ports[client]}}
+    initLimit={{profile.svc_init_limit}}
+    syncLimit={{profile.svc_sync_limit}}
+    $REGISTRIES
+    " > {{profile.svc_prop_file}}
+
+    echo "Wrote '{{profile.svc_prop_file}}':"
+    cat {{profile.svc_prop_file}}
+  """)
+)
+
+monitor = Process(
+  name = '{{profile.svc}} monitor ({{profile.svc_monitor_period}}s period)',
+  cmdline = textwrap.dedent("""
+    sleep 15
+    while true; do
+      RUOK=$(echo ruok | nc localhost {{thermos.ports[client]}})
+      if [ "$RUOK" = "imok" ]; then
+        STATE=$(echo mntr | nc localhost {{thermos.ports[client]}} | grep zk_server_state)
+        if [ -z "$STATE" ]; then
+          echo "error: not responding to 'mntr' command!" >&2
+          exit 1;
+        else
+          echo `date`: $STATE
+        fi
+      else
+        echo "warn: server not responding to 'ruok' command, maybe it's initializing?" >&2
+      fi
+      sleep {{profile.svc_monitor_period}}
+    done
+  """)
+)
+
+run = Process(
+  name = 'run {{profile.svc}}',
+  cmdline = textwrap.dedent("""
+    export JVMFLAGS='{{profile.jvm_flags}}'
+    export ZOO_LOG_DIR='{{profile.svc_log_dir}}'
+    zookeeper-{{profile.svc_ver}}/bin/zkServer.sh start-foreground ./{{profile.svc_prop_file}}
+  """)
+)
+
+base_task = Task(
+  name = 'zookeeper',
+  processes = [common, dist, register, unregister, config, monitor, run],
+  constraints = 
+    order(common, register) +
+    order(register, monitor) +
+    order(register, run) +
+    order(dist, config) +
+    order(config, monitor) +
+    order(config, run)
+)
+
+# Allocate enough disk to capture OutOfMemory heap dump
+staging_task = base_task(
+  resources = Resources(cpu = 1.0, ram = 640*MB, disk = 768*MB)
+)
+
+production_task = base_task(
+  resources = Resources(cpu = 1.0, ram = 1152*MB, disk = 1280*MB)
+)
+
+DEVELOPMENT = Profile()
+PRODUCTION = Profile(
+  jvm_flags = '-Xmx1G -Xms1G'
+)
+
+base_job = Service(
+  name = 'zookeeper',
+  role = os.getenv('USER')
+)
+
+jobs = [
+  base_job(
+    cluster = 'Oscar',
+    environment = 'devel',
+    instances = 3,
+    contact = 'james.oliver@pegs.com',
+    task = staging_task.bind(
+      profile = DEVELOPMENT
+    )
+  ),
+  base_job(
+    cluster = 'Oscar',
+    environment = 'prod',
+    instances = 5,
+    contact = 'someone.else@pegs.com',
+    task = production_task.bind(
+      profile = PRODUCTION
+    )
+  )
+]

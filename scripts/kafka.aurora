@@ -1,0 +1,162 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+# 
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+import textwrap
+
+class Profile(Struct):
+  archive = Default(String, 'https://archive.apache.org/dist')
+  gpg_grp = Default(String, 'https://people.apache.org/keys/group')
+  svc = Default(String, 'kafka')
+  svc_ver = Default(String, '0.8.1.1')
+  svc_ver_scala = Default(String, '2.10')
+  svc_prop_file = Default(String, 'server.properties')
+  jvm_heap = Default(String, '-Xmx1G -Xms1G')
+
+common = Process(
+  name = 'fetch commons',
+  cmdline = textwrap.dedent("""
+    hdfs dfs -get /dist/scripts.tgz
+    tar xf scripts.tgz
+  """)
+)
+
+dist = Process(
+  name = 'fetch {{profile.svc}} v{{profile.svc_ver_scala}}-{{profile.svc_ver}} distribution',
+  cmdline = textwrap.dedent("""
+    command -v curl >/dev/null 2>&1 || { echo >&2 "error: 'curl' is not installed. Aborting."; exit 1; }
+    eval curl -sSfL '-O {{profile.archive}}/kafka/{{profile.svc_ver}}/kafka_{{profile.svc_ver_scala}}-{{profile.svc_ver}}.tgz'{,.asc,.md5}
+    if command -v md5sum >/dev/null; then
+      md5sum -c kafka_{{profile.svc_ver_scala}}-{{profile.svc_ver}}.tgz.md5
+    else
+      echo "warn: 'md5sum' is not installed. Check skipped." >&2
+    fi
+    if command -v gpg >/dev/null; then
+      curl -sSfL {{profile.gpg_grp}}/kafka.asc | gpg --import
+      gpg kafka_{{profile.svc_ver_scala}}-{{profile.svc_ver}}.tgz.asc
+    else
+      echo "warn: 'gpg' is not installed. Signature verification skipped." >&2
+    fi
+    tar xf kafka_{{profile.svc_ver_scala}}-{{profile.svc_ver}}.tgz
+  """)
+)
+
+register = Process(
+  name = 'register-service',
+  cmdline = textwrap.dedent("""
+    export IP=$(host `hostname` | tr ' ' '\n' | tail -1)
+    ./scripts/common/registry.sh \
+      -r {{profile.svc}}-{{environment}} \
+      -i {{mesos.instance}} \
+      -p "$IP:{{thermos.ports[client]}}"
+  """)
+)
+
+unregister = Process(
+  name = 'unregister-service',
+  final = True,
+  cmdline = textwrap.dedent("""
+    ./scripts/common/registry.sh \
+      -u {{profile.svc}}-{{environment}} \
+      -i {{mesos.instance}}
+  """)
+)
+
+config = Process(
+  name = 'create {{profile.svc_prop_file}}',
+  cmdline = textwrap.dedent("""
+    export ZK_CONNECT=$(echo -e `./scripts/common/registry.sh -q zookeeper-{{environment}}-client` | awk '{printf("%s,", $0)}')
+    export IP=$(host `hostname` | tr ' ' '\n' | tail -1)
+
+    echo -e "
+    broker.id={{mesos.instance}}
+    port={{thermos.ports[client]}}
+    host.name=$IP
+    advertised.host.name=$IP
+    num.network.threads=2
+    num.io.threads=8
+    socket.send.buffer.bytes=1048576
+    socket.receive.buffer.bytes=1048576
+    socket.request.max.bytes=104857600
+    log.dirs=kafka-logs
+    num.partitions=1
+    log.retention.hours=168
+    log.segment.bytes=536870912
+    log.retention.check.interval.ms=60000
+    log.cleaner.enable=false
+    zookeeper.connect=$ZK_CONNECT
+    zookeeper.connection.timeout.ms=30000
+    " > {{profile.svc_prop_file}}
+
+    echo "Wrote '{{profile.svc_prop_file}}':"
+    cat {{profile.svc_prop_file}}
+  """)
+)
+
+run = Process(
+  name = 'run {{profile.svc}}',
+  cmdline = textwrap.dedent("""
+    export KAFKA_HEAP_OPTS={{profile.jvm_heap}}
+    kafka_{{profile.svc_ver_scala}}-{{profile.svc_ver}}/bin/kafka-server-start.sh {{profile.svc_prop_file}}'
+  """)
+)
+
+base_task = Task(
+  processes = [register, unregister, common, dist, config, run],
+  constraints = 
+    order(dist, run) +
+    order(common, register) +
+    order(common, config, run)
+)
+
+staging_task = base_task(
+  resources = Resources(cpu = 1.0, ram = 1280*MB, disk = 5*GB)
+)
+
+production_task = base_task(
+  resources = Resources(cpu = 1.0, ram = 2304*MB, disk = 10*GB)
+)
+
+DEVELOPMENT = Profile()
+PRODUCTION = Profile(
+  jvm_heap = '-Xmx2G -Xms2G'
+)
+
+base_job = Job(
+  name = 'kafka',
+  role = os.getenv('USER'),
+  service = True
+)
+
+jobs = [
+  base_job(
+    cluster = 'Oscar',
+    environment = 'devel',
+    instances = 4,
+    contact = 'james.oliver@pegs.com',
+    task = staging_task.bind(
+      profile = DEVELOPMENT
+    )
+  ),
+  base_job(
+    cluster = 'Oscar',
+    environment = 'prod',
+    instances = 8,
+    contact = 'someone.else@pegs.com',
+    task = production_task.bind(
+      profile = PRODUCTION
+    )
+  )
+]
