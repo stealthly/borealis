@@ -57,10 +57,7 @@ register = Process(
   name = 'register-service',
   cmdline = textwrap.dedent("""
     export IP=$(host `hostname` | tr ' ' '\n' | tail -1)
-    ./scripts/common/registry.sh \
-      -r {{profile.svc}}-{{environment}} \
-      -i {{mesos.instance}} \
-      -p "$IP:{{thermos.ports[client]}}"
+    ./scripts/common/registry.sh -r {{profile.svc}}-{{environment}} -i {{mesos.instance}} -p "$IP:{{thermos.ports[client]}}"
   """)
 )
 
@@ -68,9 +65,7 @@ unregister = Process(
   name = 'unregister-service',
   final = True,
   cmdline = textwrap.dedent("""
-    ./scripts/common/registry.sh \
-      -u {{profile.svc}}-{{environment}} \
-      -i {{mesos.instance}}
+    ./scripts/common/registry.sh -u {{profile.svc}}-{{environment}} -i {{mesos.instance}}
   """)
 )
 
@@ -108,8 +103,11 @@ config = Process(
 run = Process(
   name = 'run {{profile.svc}}',
   cmdline = textwrap.dedent("""
-    export KAFKA_HEAP_OPTS={{profile.jvm_heap}}
-    kafka_{{profile.svc_ver_scala}}-{{profile.svc_ver}}/bin/kafka-server-start.sh {{profile.svc_prop_file}}'
+    export KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:kafka_{{profile.svc_ver_scala}}-{{profile.svc_ver}}/config/log4j.properties"
+    export KAFKA_HEAP_OPTS="{{profile.jvm_heap}}"
+    export EXTRA_ARGS="-name kafkaServer -loggc"
+    
+    kafka_{{profile.svc_ver_scala}}-{{profile.svc_ver}}/bin/kafka-run-class.sh $EXTRA_ARGS kafka.Kafka {{profile.svc_prop_file}}
   """)
 )
 
