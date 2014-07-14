@@ -1,0 +1,249 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+# 
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+import textwrap
+
+class Profile(Struct):
+  archive = Default(String, 'https://archive.apache.org/dist')
+  gpg_grp = Default(String, 'https://people.apache.org/keys/group')
+  svc = Default(String, 'cassandra')
+  svc_ver = Default(String, '2.0.7')
+  svc_pid_file = Default(String, 'cassandra.pid')
+  jvm_flags = Default(String, '-Xmx1G -Xms1G')
+  # We can't use environment introspection (yet) because C* assumes that all nodes
+  # in a C* ring are running things on the same ports. This is a known limitation.
+  client_port = Default(String, '9160')
+  storage_port = Default(String, '7000')
+  native_port = Default(String, '9042')
+  jmx_port = Default(String, '7199')
+
+common = Process(
+  name = 'fetch commons',
+  cmdline = textwrap.dedent("""
+    hdfs dfs -get /dist/scripts.tgz
+    tar xf scripts.tgz
+  """)
+)
+
+dist = Process(
+  name = 'fetch {{profile.svc}} v{{profile.svc_ver}} distribution',
+  cmdline = textwrap.dedent("""
+    command -v curl >/dev/null 2>&1 || { echo >&2 "error: 'curl' is not installed. Aborting."; exit 1; }
+    eval curl -sSfL '-O {{profile.archive}}/cassandra/{{profile.svc_ver}}/apache-cassandra-{{profile.svc_ver}}-bin.tar.gz'{,.asc,.md5,.sha1}
+    if command -v md5sum >/dev/null; then
+      md5sum -c apache-cassandra-{{profile.svc_ver}}-bin.tar.gz.md5
+    elif command -v sha1sum >/dev/null; then
+      sha1sum -c apache-cassandra-{{profile.svc_ver}}-bin.tar.gz.sha1
+    else
+      echo "warn: 'md5sum' and 'sha1sum' are not installed. Check skipped." >&2
+    fi
+    if command -v gpg >/dev/null; then
+      curl -sSfL {{profile.gpg_grp}}/cassandra.asc | gpg --import
+      gpg apache-cassandra-{{profile.svc_ver}}-bin.tar.gz.asc
+    else
+      echo "warn: 'gpg' is not installed. Signature verification skipped." >&2
+    fi
+    tar xf apache-cassandra-{{profile.svc_ver}}-bin.tar.gz
+  """)
+)
+
+register = Process (
+  name = 'register-service',
+  cmdline = textwrap.dedent("""
+    export IP=$(host `hostname` | tr ' ' '\n' | tail -1)
+    ./scripts/common/registry.sh -r {{profile.svc}}-{{environment}} -i {{mesos.instance}} -p "$IP"
+  """)
+)
+
+unregister = Process (
+  name = 'unregister-service',
+  final = True,
+  cmdline = textwrap.dedent("""
+    ./scripts/common/registry.sh -u {{profile.svc}}-{{environment}} -i {{mesos.instance}}
+  """)
+)
+
+config = Process(
+  name = 'configure-service',
+  cmdline = textwrap.dedent("""
+    export IP=$(host `hostname` | tr ' ' '\n' | tail -1)
+    export CASS_HOSTS=$(echo -e `./scripts/common/registry.sh -q {{profile.svc}}-{{environment}} -c {{instances}}` | awk '{printf("%s,", $0)}')
+    export CONCURRENT_WRITES=$(echo {{resources.cpu}} | awk '{printf "%d", 8*$1}')
+
+    echo -e "
+    cluster_name: '{{cluster}}'
+    num_tokens: 256
+    hinted_handoff_enabled: true
+    max_hint_window_in_ms: 10800000
+    hinted_handoff_throttle_in_kb: 1024
+    max_hints_delivery_threads: 2
+    batchlog_replay_throttle_in_kb: 1024
+    authenticator: AllowAllAuthenticator
+    authorizer: AllowAllAuthorizer
+    permissions_validity_in_ms: 2000
+    partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+    data_file_directories:
+        - $PWD/data
+    commitlog_directory: $PWD/commitlog
+    disk_failure_policy: stop
+    commit_failure_policy: stop
+    key_cache_size_in_mb:
+    key_cache_save_period: 14400
+    row_cache_size_in_mb: 0
+    row_cache_save_period: 0
+    memory_allocator: NativeAllocator
+    saved_caches_directory: $PWD/saved_caches
+    commitlog_sync: periodic
+    commitlog_sync_period_in_ms: 10000
+    commitlog_segment_size_in_mb: 32
+    seed_provider:
+        - class_name: org.apache.cassandra.locator.SimpleSeedProvider
+          parameters:
+              # This constructs a Set<InetAddress>, not Set<InetSocketAddress>, so we can't specify a port :-(
+              - seeds: \\"$CASS_HOSTS\\"
+    concurrent_reads: 16
+    concurrent_writes: $CONCURRENT_WRITES
+    memtable_flush_queue_size: 4
+    trickle_fsync: false
+    trickle_fsync_interval_in_kb: 10240
+    storage_port: {{profile.storage_port}}
+    listen_address: $IP
+    start_native_transport: true
+    native_transport_port: {{profile.native_port}}
+    start_rpc: true
+    # Listen on all interfaces for client connections (may break auto-discovery)
+    rpc_address: 0.0.0.0
+    rpc_port: {{profile.client_port}}
+    rpc_keepalive: true
+    rpc_server_type: sync
+    thrift_framed_transport_size_in_mb: 15
+    incremental_backups: false
+    snapshot_before_compaction: false
+    auto_snapshot: true
+    tombstone_warn_threshold: 1000
+    tombstone_failure_threshold: 100000
+    column_index_size_in_kb: 64
+    in_memory_compaction_limit_in_mb: 64
+    multithreaded_compaction: false
+    compaction_throughput_mb_per_sec: 16
+    compaction_preheat_key_cache: true
+    read_request_timeout_in_ms: 5000
+    range_request_timeout_in_ms: 10000
+    write_request_timeout_in_ms: 2000
+    cas_contention_timeout_in_ms: 1000
+    truncate_request_timeout_in_ms: 60000
+    request_timeout_in_ms: 10000
+    cross_node_timeout: false
+    endpoint_snitch: SimpleSnitch
+    dynamic_snitch_badness_threshold: 0.1
+    request_scheduler: org.apache.cassandra.scheduler.NoScheduler
+    server_encryption_options:
+        internode_encryption: none
+        keystore: conf/.keystore
+        keystore_password: cassandra
+        truststore: conf/.truststore
+        truststore_password: cassandra
+    client_encryption_options:
+        enabled: false
+        keystore: conf/.keystore
+        keystore_password: cassandra
+    internode_compression: all
+    inter_dc_tcp_nodelay: false
+    preheat_kernel_page_cache: false
+    " > apache-cassandra-{{profile.svc_ver}}/conf/cassandra.yaml
+
+    echo "Wrote 'cassandra.yaml':"
+    cat apache-cassandra-{{profile.svc_ver}}/conf/cassandra.yaml
+
+    sed -i.orig "s:/var/log/cassandra:$PWD/logs:g" apache-cassandra-{{profile.svc_ver}}/conf/log4j-server.properties
+    
+    echo "Patched 'log4j-server.properties':"
+    cat apache-cassandra-{{profile.svc_ver}}/conf/log4j-server.properties
+
+    sed -i.orig "s/JMX_PORT=\"7199\"/JMX_PORT=\"{{profile.jmx_port}}\"/g" apache-cassandra-{{profile.svc_ver}}/conf/cassandra-env.sh
+
+    echo "Patched 'cassandra-env.sh':"
+    cat apache-cassandra-{{profile.svc_ver}}/conf/cassandra-env.sh
+  """)
+)
+
+run = Process (
+  name = 'run {{profile.svc}}',
+  cmdline = textwrap.dedent("""
+    export JVM_OPTS="{{profile.jvm_flags}}"
+    apache-cassandra-{{profile.svc_ver}}/bin/cassandra -f -p {{profile.svc_pid_file}}
+  """)
+)
+
+base_task = Task (
+  processes = [register, unregister, common, dist, config, run],
+  constraints = 
+    order(common, register) +
+    order(common, config) +
+    order(dist, config, run)
+)
+
+staging_task = base_task(
+  resources = Resources(cpu = 1.0, ram = 1280*MB, disk = 5*GB)
+)
+
+production_task = base_task(
+  resources = Resources(cpu = 1.0, ram = 2304*MB, disk = 10*GB)
+)
+
+
+DEVELOPMENT = Profile(
+  # Ports must be the same across all instances
+  client_port = '5555',
+  storage_port = '5556',
+  native_port = '5557',
+  jmx_port = '5558'
+)
+PRODUCTION = Profile(
+  # Ports must be the same across all instances
+  client_port = '6666',
+  storage_port = '6667',
+  native_port = '6668',
+  jmx_port = '6669',
+  jvm_flags = '-Xmx2G -Xms2G'
+)
+
+base_job = Job(
+  name = 'cassandra',
+  role = os.getenv('USER'),
+  service = True
+)
+
+jobs = [
+  base_job(
+    cluster = 'Oscar',
+    environment = 'devel',
+    instances = 3,
+    contact = 'james.oliver@pegs.com',
+    task = staging_task.bind(
+      profile = DEVELOPMENT
+    )
+  ),
+  base_job(
+    cluster = 'Oscar',
+    environment = 'prod',
+    instances = 5,
+    contact = 'someone.else@pegs.com',
+    task = production_task.bind(
+      profile = PRODUCTION
+    )
+  )
+]
