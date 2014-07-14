@@ -108,7 +108,7 @@ config = Process(
 monitor = Process(
   name = '{{profile.svc}} monitor ({{profile.svc_monitor_period}}s period)',
   cmdline = textwrap.dedent("""
-    sleep 15
+    sleep 30
     while true; do
       RUOK=$(echo ruok | nc localhost {{thermos.ports[client]}})
       if [ "$RUOK" = "imok" ]; then
@@ -130,8 +130,8 @@ monitor = Process(
 run = Process(
   name = 'run {{profile.svc}}',
   cmdline = textwrap.dedent("""
-    export JVMFLAGS='{{profile.jvm_flags}}'
-    export ZOO_LOG_DIR='{{profile.svc_log_dir}}'
+    export JVMFLAGS="{{profile.jvm_flags}}"
+    export ZOO_LOG_DIR="{{profile.svc_log_dir}}"
     zookeeper-{{profile.svc_ver}}/bin/zkServer.sh start-foreground ./{{profile.svc_prop_file}}
   """)
 )
