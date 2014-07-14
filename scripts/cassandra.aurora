@@ -173,7 +173,7 @@ config = Process(
     echo "Patched 'log4j-server.properties':"
     cat apache-cassandra-{{profile.svc_ver}}/conf/log4j-server.properties
 
-    sed -i.orig "s/JMX_PORT=\"7199\"/JMX_PORT=\"{{profile.jmx_port}}\"/g" apache-cassandra-{{profile.svc_ver}}/conf/cassandra-env.sh
+    sed -i.orig 's/JMX_PORT=\"7199\"/JMX_PORT=\"{{profile.jmx_port}}\"/g' apache-cassandra-{{profile.svc_ver}}/conf/cassandra-env.sh
 
     echo "Patched 'cassandra-env.sh':"
     cat apache-cassandra-{{profile.svc_ver}}/conf/cassandra-env.sh
