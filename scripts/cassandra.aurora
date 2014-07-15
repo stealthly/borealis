@@ -60,7 +60,7 @@ dist = Process(
   """)
 )
 
-register = Process (
+register = Process(
   name = 'register-service',
   cmdline = textwrap.dedent("""
     export IP=$(host `hostname` | tr ' ' '\n' | tail -1)
@@ -68,7 +68,7 @@ register = Process (
   """)
 )
 
-unregister = Process (
+unregister = Process(
   name = 'unregister-service',
   final = True,
   cmdline = textwrap.dedent("""
@@ -180,7 +180,7 @@ config = Process(
   """)
 )
 
-run = Process (
+run = Process(
   name = 'run {{profile.svc}}',
   cmdline = textwrap.dedent("""
     export JVM_OPTS="{{profile.jvm_flags}}"
@@ -188,7 +188,7 @@ run = Process (
   """)
 )
 
-base_task = Task (
+base_task = Task(
   processes = [register, unregister, common, dist, config, run],
   constraints = 
     order(common, register) +
@@ -203,7 +203,6 @@ staging_task = base_task(
 production_task = base_task(
   resources = Resources(cpu = 1.0, ram = 2304*MB, disk = 10*GB)
 )
-
 
 DEVELOPMENT = Profile(
   # Ports must be the same across all instances
@@ -221,10 +220,9 @@ PRODUCTION = Profile(
   jvm_flags = '-Xmx2G -Xms2G'
 )
 
-base_job = Job(
+base_job = Service(
   name = 'cassandra',
-  role = os.getenv('USER'),
-  service = True
+  role = os.getenv('USER')
 )
 
 jobs = [
@@ -241,6 +239,7 @@ jobs = [
     cluster = 'Oscar',
     environment = 'prod',
     instances = 5,
+    production = True,
     contact = 'someone.else@pegs.com',
     task = production_task.bind(
       profile = PRODUCTION

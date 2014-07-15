@@ -106,7 +106,7 @@ run = Process(
     export KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:kafka_{{profile.svc_ver_scala}}-{{profile.svc_ver}}/config/log4j.properties"
     export KAFKA_HEAP_OPTS="{{profile.jvm_heap}}"
     export EXTRA_ARGS="-name kafkaServer -loggc"
-    
+
     kafka_{{profile.svc_ver_scala}}-{{profile.svc_ver}}/bin/kafka-run-class.sh $EXTRA_ARGS kafka.Kafka {{profile.svc_prop_file}}
   """)
 )
@@ -132,10 +132,9 @@ PRODUCTION = Profile(
   jvm_heap = '-Xmx2G -Xms2G'
 )
 
-base_job = Job(
+base_job = Service(
   name = 'kafka',
-  role = os.getenv('USER'),
-  service = True
+  role = os.getenv('USER')
 )
 
 jobs = [
@@ -152,6 +151,7 @@ jobs = [
     cluster = 'Oscar',
     environment = 'prod',
     instances = 8,
+    production = True,
     contact = 'someone.else@pegs.com',
     task = production_task.bind(
       profile = PRODUCTION

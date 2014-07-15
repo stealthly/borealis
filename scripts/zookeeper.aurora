@@ -181,6 +181,7 @@ jobs = [
     cluster = 'Oscar',
     environment = 'prod',
     instances = 5,
+    production = True,
     contact = 'someone.else@pegs.com',
     task = production_task.bind(
       profile = PRODUCTION
